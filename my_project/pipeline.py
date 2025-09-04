@@ -22,22 +22,37 @@ from typing import Iterable, Iterator, Optional, Tuple, Union
 # third party libraries
 import apache_beam as beam
 import numpy as np
-import torch
-import torch.nn as nn
 from apache_beam.io.filesystems import FileSystems
 from apache_beam.ml.inference.base import KeyedModelHandler, PredictionResult, RunInference
-from apache_beam.ml.inference.pytorch_inference import PytorchModelHandlerTensor
 from apache_beam.ml.inference.tensorflow_inference import TFModelHandlerTensor
 from PIL import Image
-from torchvision import models, transforms
+
+# Conditionally import PyTorch only when needed
+torch = None
+nn = None
+PytorchModelHandlerTensor = None
+models = None
+transforms = None
+
+# third party libraries
+from tensorflow.keras.applications import MobileNetV2, ResNet50  # For direct Keras model loading  # noqa: E402
 
 # Dataflow ML libraries
-from my_project.config import ModelConfig, ModelName, SinkConfig, SourceConfig
+from my_project.config import ModelConfig, ModelName, SinkConfig, SourceConfig  # noqa: E402
 
-import tensorflow as tf  # isort:skip
+import tensorflow as tf  # isort:skip  # noqa: E402
 
 
-def get_model_class(model_name: ModelName) -> nn.Module:
+def get_model_class(model_name: ModelName):
+    # Import PyTorch modules only when needed
+    global torch, nn, PytorchModelHandlerTensor, models, transforms
+    if torch is None:
+        # third party libraries
+        import torch
+        import torch.nn as nn
+        from apache_beam.ml.inference.pytorch_inference import PytorchModelHandlerTensor
+        from torchvision import models, transforms
+
     model_dict = {ModelName.RESNET101: models.resnet101, ModelName.MOBILENET_V2: models.mobilenet_v2}
 
     model_class = model_dict.get(model_name)
@@ -56,7 +71,14 @@ def read_image(image_file_name: Union[str, bytes], path_to_dir: Optional[str] = 
         return image_file_name, data
 
 
-def preprocess_image(data: Image.Image) -> torch.Tensor:
+def preprocess_image(data: Image.Image):
+    # Import PyTorch modules only when needed
+    global torch, transforms
+    if torch is None:
+        # third party libraries
+        import torch
+        from torchvision import transforms
+
     image_size = (224, 224)
     # Pre-trained PyTorch models expect input images normalized with the
     # below values (see: https://pytorch.org/vision/stable/models.html)
@@ -87,12 +109,29 @@ def filter_empty_lines(text: str) -> Iterator[str]:
 
 class PostProcessor(beam.DoFn):
     def process(self, element: Tuple[str, PredictionResult]) -> Iterable[str]:
+        global torch
         filename, prediction_result = element
-        if isinstance(prediction_result.inference, torch.Tensor):
+
+        # Check if we're dealing with a PyTorch tensor
+        if hasattr(
+            prediction_result.inference, "__class__"
+        ) and prediction_result.inference.__class__.__module__.startswith("torch"):
+            # Import PyTorch if not already imported
+            if torch is None:
+                # third party libraries
+                import torch
             prediction = torch.argmax(prediction_result.inference, dim=0)
         else:
+            # Handle numpy array or TensorFlow tensor
             prediction = np.argmax(prediction_result.inference)
-        yield filename + "," + str(prediction.item())
+
+        # Handle both PyTorch and NumPy/TensorFlow cases for item() method
+        if hasattr(prediction, "item"):
+            result = prediction.item()
+        else:
+            result = prediction
+
+        yield filename + "," + str(result)
 
 
 def build_pipeline(pipeline, source_config: SourceConfig, sink_config: SinkConfig, model_config: ModelConfig) -> None:
@@ -107,6 +146,15 @@ def build_pipeline(pipeline, source_config: SourceConfig, sink_config: SinkConfi
     # In this example we pass keyed inputs to RunInference transform.
     # Therefore, we use KeyedModelHandler wrapper over PytorchModelHandler or TFModelHandlerTensor.
     if model_config.model_state_dict_path:
+        # Import PyTorch modules only when needed
+        global torch, nn, PytorchModelHandlerTensor, models, transforms
+        if torch is None:
+            # third party libraries
+            import torch
+            import torch.nn as nn
+            from apache_beam.ml.inference.pytorch_inference import PytorchModelHandlerTensor
+            from torchvision import models, transforms
+
         model_handler = KeyedModelHandler(
             PytorchModelHandlerTensor(
                 state_dict_path=model_config.model_state_dict_path,
@@ -118,14 +166,40 @@ def build_pipeline(pipeline, source_config: SourceConfig, sink_config: SinkConfi
             )
         )
     elif model_config.tf_model_uri:
-        model_handler = KeyedModelHandler(
-            TFModelHandlerTensor(
-                model_uri=model_config.tf_model_uri,
-                device=model_config.device,
-                min_batch_size=model_config.min_batch_size,
-                max_batch_size=model_config.max_batch_size,
+        # Handle Keras application models with 'keras://' prefix
+        if model_config.tf_model_uri.startswith("keras://"):
+            # Extract the model name from the URI
+            keras_model_name = model_config.tf_model_uri.split("://")[-1]
+
+            # Custom model handler for Keras applications
+            class KerasApplicationModelHandler(TFModelHandlerTensor):
+                def load_model(self):
+                    # Load the appropriate Keras application model
+                    if keras_model_name == "MobileNetV2":
+                        return MobileNetV2(weights="imagenet")
+                    elif keras_model_name == "ResNet50":
+                        return ResNet50(weights="imagenet")
+                    else:
+                        raise ValueError(f"Unsupported Keras application model: {keras_model_name}")
+
+            model_handler = KeyedModelHandler(
+                KerasApplicationModelHandler(
+                    model_uri=None,  # Not used for Keras applications
+                    device=model_config.device,
+                    min_batch_size=model_config.min_batch_size,
+                    max_batch_size=model_config.max_batch_size,
+                )
             )
-        )
+        else:
+            # Regular TensorFlow Hub model
+            model_handler = KeyedModelHandler(
+                TFModelHandlerTensor(
+                    model_uri=model_config.tf_model_uri,
+                    device=model_config.device,
+                    min_batch_size=model_config.min_batch_size,
+                    max_batch_size=model_config.max_batch_size,
+                )
+            )
     else:
         raise ValueError("Only support PytorchModelHandler and TFModelHandlerTensor!")
 
