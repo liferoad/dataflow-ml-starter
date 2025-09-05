@@ -188,6 +188,8 @@ def build_pipeline(pipeline, source_config: SourceConfig, sink_config: SinkConfi
                     device=model_config.device,
                     min_batch_size=model_config.min_batch_size,
                     max_batch_size=model_config.max_batch_size,
+                    large_model=True,
+                    model_copies=1,
                 )
             )
         else:
@@ -198,6 +200,8 @@ def build_pipeline(pipeline, source_config: SourceConfig, sink_config: SinkConfi
                     device=model_config.device,
                     min_batch_size=model_config.min_batch_size,
                     max_batch_size=model_config.max_batch_size,
+                    large_model=True,
+                    model_copies=1,
                 )
             )
     else:
@@ -217,6 +221,7 @@ def build_pipeline(pipeline, source_config: SourceConfig, sink_config: SinkConfi
         filename_value_pair = (
             pipeline
             | "ReadImageNames" >> beam.io.ReadFromText(source_config.input)
+            | "ReshuffleImageNames" >> beam.Reshuffle()
             | "FilterEmptyLines" >> beam.ParDo(filter_empty_lines)
             | "ReadImageData"
             >> beam.Map(lambda image_name: read_image(image_file_name=image_name, path_to_dir=source_config.images_dir))
@@ -234,6 +239,7 @@ def build_pipeline(pipeline, source_config: SourceConfig, sink_config: SinkConfi
     # do the model inference and postprocessing
     predictions = (
         filename_value_pair
+        | "ReshuffleImagesBeforeInference" >> beam.Reshuffle()
         | "RunInference" >> RunInference(model_handler)
         | "ProcessOutput" >> beam.ParDo(PostProcessor())
     )

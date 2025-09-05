@@ -147,6 +147,7 @@ else
 	--device GPU \
 	--dataflow_service_option $(SERVICE_OPTIONS) \
 	--number_of_worker_harness_threads 1 \
+	--num_workers 20 \
 	--experiments=disable_worker_container_image_prepull \
 	--experiments=use_pubsub_streaming \
 	--sdk_container_image $(CUSTOM_CONTAINER_IMAGE) \
